@@ -549,6 +549,9 @@
 		"error": {
 			"common_segments_invalid_sections": "Sekce musí být seznam čísel sekcí oddělený čárkou (např. \"1, 2, 3\").",
 			"common_segments_name_required": "Při zadaných sekcích je název povinný."
+		},
+		"abort": {
+			"common_segments_done": "Společné segmenty uloženy"
 		}
 	},
 	"selector": {

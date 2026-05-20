@@ -163,6 +163,31 @@ def create_range_validation(minimum: int, maximum: int):
 	return vol.All(vol.Coerce(int), vol.Range(min=minimum, max=maximum))
 
 
+# Localized labels for the common-segments action SelectSelector. The labels
+# include dynamic parts (segment name, sections), so HA's translation_key
+# pathway can't handle them — picked at runtime from hass.config.language.
+_ACTION_LABELS: Dict[str, Dict[str, str]] = {
+	"en": {
+		"add": "+ Add common segment",
+		"edit": "✎ Edit: {name} ({sections})",
+		"remove": "✕ Remove: {name}",
+		"done": "✓ Done",
+	},
+	"sk": {
+		"add": "+ Pridať spoločný segment",
+		"edit": "✎ Upraviť: {name} ({sections})",
+		"remove": "✕ Odstrániť: {name}",
+		"done": "✓ Hotovo",
+	},
+	"cs": {
+		"add": "+ Přidat společný segment",
+		"edit": "✎ Upravit: {name} ({sections})",
+		"remove": "✕ Odstranit: {name}",
+		"done": "✓ Hotovo",
+	},
+}
+
+
 class JablotronConfigFlow(ConfigFlow, domain=DOMAIN):
 	_config_entry: ConfigEntry | None
 	_config: Dict[str, Any] | None = None
@@ -476,21 +501,22 @@ class JablotronOptionsFlow(OptionsFlow):
 				if 0 <= index < len(segments):
 					del segments[index]
 					self._options[CONF_COMMON_SEGMENTS] = segments
+					self._persist_options()
 				return await self.async_step_common_segments()
 
-			if action == "save":
-				return self._save()
+			if action == "done":
+				return self.async_abort(reason="common_segments_done")
 
 		existing = self._options.get(CONF_COMMON_SEGMENTS, []) or []
 
-		options: List[Dict[str, str]] = [{"value": "add", "label": "+ Add common segment"}]
+		options: List[Dict[str, str]] = [{"value": "add", "label": self._action_label("add")}]
 		for i, seg in enumerate(existing):
 			name = str(seg.get(CommonSegmentData.NAME.value, "") or f"#{i + 1}")
 			sections_value = seg.get(CommonSegmentData.SECTIONS.value, []) or []
 			sections_str = ", ".join(str(s) for s in sections_value) if sections_value else "—"
-			options.append({"value": f"edit_{i}", "label": f"✎ Edit: {name} ({sections_str})"})
-			options.append({"value": f"remove_{i}", "label": f"✕ Remove: {name}"})
-		options.append({"value": "save", "label": "✓ Save and exit"})
+			options.append({"value": f"edit_{i}", "label": self._action_label("edit", name=name, sections=sections_str)})
+			options.append({"value": f"remove_{i}", "label": self._action_label("remove", name=name)})
+		options.append({"value": "done", "label": self._action_label("done")})
 
 		return self.async_show_form(
 			step_id="common_segments",
@@ -545,6 +571,7 @@ class JablotronOptionsFlow(OptionsFlow):
 					existing.append(new_segment)
 				self._options[CONF_COMMON_SEGMENTS] = existing
 				self._editing_segment_index = None
+				self._persist_options()
 				return await self.async_step_common_segments()
 
 		section_options = self._get_section_selector_options(
@@ -586,6 +613,24 @@ class JablotronOptionsFlow(OptionsFlow):
 			sections = set(range(1, MAX_SECTIONS + 1))
 
 		return [{"value": str(s), "label": f"Section {s}"} for s in sorted(sections)]
+
+	def _persist_options(self) -> None:
+		# Push current self._options to the config entry without ending the flow.
+		# Triggers options_update_listener which reloads the integration in
+		# background so the new entities appear (or removed ones disappear).
+		self.hass.config_entries.async_update_entry(
+			self._config_entry,
+			options=self._options,
+		)
+
+	def _action_label(self, key: str, **kwargs: str) -> str:
+		# HA SelectSelector only resolves translation_key for statically-known
+		# option values, so dynamically generated edit_<N> / remove_<N> labels
+		# can't go through strings.json. Localize them in Python instead by
+		# picking the user's HA language; fall back to English.
+		lang = (self.hass.config.language or "en").split("-")[0]
+		template = _ACTION_LABELS.get(lang, _ACTION_LABELS["en"]).get(key) or _ACTION_LABELS["en"][key]
+		return template.format(**kwargs) if kwargs else template
 
 	async def async_step_debug(self, user_input: Dict[str, Any] | None = None) -> ConfigFlowResult:
 		if user_input is not None:
