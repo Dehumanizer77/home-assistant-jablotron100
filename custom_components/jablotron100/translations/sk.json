@@ -549,6 +549,9 @@
 		"error": {
 			"common_segments_invalid_sections": "Sekcie musia byť zoznam čísel sekcií oddelený čiarkou (napr. \"1, 2, 3\").",
 			"common_segments_name_required": "Pri zadaných sekciách je názov povinný."
+		},
+		"abort": {
+			"common_segments_done": "Spoločné segmenty uložené"
 		}
 	},
 	"selector": {
