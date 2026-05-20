@@ -505,7 +505,12 @@ class JablotronOptionsFlow(OptionsFlow):
 				return await self.async_step_common_segments()
 
 			if action == "done":
-				return self.async_abort(reason="common_segments_done")
+				# Close cleanly via async_create_entry instead of async_abort so
+				# the user gets the normal "Saved" toast rather than a popup
+				# they have to dismiss. Auto-save has already persisted the
+				# data, so HA's diff check inside async_update_entry will
+				# short-circuit and skip the extra reload.
+				return self._save()
 
 		existing = self._options.get(CONF_COMMON_SEGMENTS, []) or []
 
