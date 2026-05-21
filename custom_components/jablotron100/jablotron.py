@@ -678,6 +678,53 @@ class Jablotron:
 			initial_state = self._derive_common_segment_alarm_state(sections)
 			self._set_entity_initial_state(common_segment_id, initial_state)
 
+		self._cleanup_orphaned_common_segments()
+
+	def _cleanup_orphaned_common_segments(self) -> None:
+		# Removing a common segment from options leaves its entity registry
+		# entry behind, which surfaces in HA as an "unavailable" alarm panel
+		# that never goes away. Same for the device. Walk both registries
+		# and drop entries that no longer correspond to a configured segment.
+		if self._central_unit is None:
+			return
+
+		entity_reg = er.async_get(self._hass)
+		device_reg = dr.async_get(self._hass)
+
+		unique_id_prefix = "{}.{}.".format(DOMAIN, self._central_unit.unique_id)
+		common_segment_unique_id_prefix = unique_id_prefix + "common_segment_"
+
+		valid_unique_ids: set[str] = set()
+		valid_device_ids: set[str] = set()
+		for control in self.entities[EntityType.ALARM_CONTROL_PANEL].values():
+			if isinstance(control, JablotronCommonSegment):
+				valid_unique_ids.add(unique_id_prefix + control.id)
+				if control.hass_device is not None:
+					valid_device_ids.add(control.hass_device.id)
+
+		for entry in er.async_entries_for_config_entry(entity_reg, self._config_entry_id):
+			if not entry.unique_id.startswith(common_segment_unique_id_prefix):
+				continue
+			if entry.unique_id in valid_unique_ids:
+				continue
+			entity_reg.async_remove(entry.entity_id)
+			stale_control_id = entry.unique_id[len(unique_id_prefix):]
+			self.entities_states.pop(stale_control_id, None)
+
+		for device_entry in dr.async_entries_for_config_entry(device_reg, self._config_entry_id):
+			should_remove = False
+			for identifier in device_entry.identifiers:
+				if identifier[0] != DOMAIN:
+					continue
+				device_id_part = identifier[1]
+				if not device_id_part.startswith("common_segment_"):
+					continue
+				if device_id_part not in valid_device_ids:
+					should_remove = True
+				break
+			if should_remove:
+				device_reg.async_remove_device(device_entry.id)
+
 	def _get_common_segments_config(self) -> List[Dict[str, Any]]:
 		raw = self._options.get(CONF_COMMON_SEGMENTS, [])
 		if not isinstance(raw, list):
