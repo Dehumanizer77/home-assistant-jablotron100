@@ -25,6 +25,7 @@ CONF_COMMON_SEGMENTS: Final = "common_segments"
 
 
 class CommonSegmentData(StrEnum):
+	ID = "id"
 	NAME = "name"
 	SECTIONS = "sections"
 
