@@ -24,6 +24,7 @@ import math
 import os
 import threading
 import time
+import uuid
 from .const import (
 	AUTODETECT_SERIAL_PORT,
 	BATTERY_LEVEL_NO_BATTERY,
@@ -657,15 +658,32 @@ class Jablotron:
 		return True
 
 	def _create_common_segments(self) -> None:
-		for index, common_segment_config in enumerate(self._get_common_segments_config()):
-			name = str(common_segment_config.get(CommonSegmentData.NAME.value, "") or "").strip()
-			sections = [int(s) for s in common_segment_config.get(CommonSegmentData.SECTIONS.value, [])]
+		raw_configs = self._get_common_segments_config()
+		normalized_configs: List[Dict[str, Any]] = []
+		needs_persist = False
+
+		for common_segment_config in raw_configs:
+			normalized = dict(common_segment_config)
+
+			segment_id = str(normalized.get(CommonSegmentData.ID.value, "") or "")
+			if not segment_id:
+				# Backfill a stable random id for segments stored under the
+				# old index-based scheme. Persisting this back to options
+				# below means the same id sticks across reloads / reorders.
+				segment_id = uuid.uuid4().hex[:8]
+				normalized[CommonSegmentData.ID.value] = segment_id
+				needs_persist = True
+
+			normalized_configs.append(normalized)
+
+			name = str(normalized.get(CommonSegmentData.NAME.value, "") or "").strip()
+			sections = [int(s) for s in normalized.get(CommonSegmentData.SECTIONS.value, [])]
 
 			if not name or not sections:
 				continue
 
-			common_segment_id = self._get_common_segment_id(index)
-			common_segment_hass_device = self._create_common_segment_hass_device(index, name)
+			common_segment_id = self._get_common_segment_id(segment_id)
+			common_segment_hass_device = self._create_common_segment_hass_device(segment_id, name)
 
 			self.entities[EntityType.ALARM_CONTROL_PANEL][common_segment_id] = JablotronCommonSegment(
 				self._central_unit,
@@ -677,6 +695,74 @@ class Jablotron:
 
 			initial_state = self._derive_common_segment_alarm_state(sections)
 			self._set_entity_initial_state(common_segment_id, initial_state)
+
+		if needs_persist:
+			# Safe to update options here: options_update_listener is only
+			# wired in __init__.py *after* initialize() returns, so this
+			# write doesn't trigger another reload loop.
+			config_entry = self._hass.config_entries.async_get_entry(self._config_entry_id)
+			if config_entry is not None:
+				new_options = dict(config_entry.options)
+				new_options[CONF_COMMON_SEGMENTS] = normalized_configs
+				self._hass.config_entries.async_update_entry(config_entry, options=new_options)
+				self._options = new_options
+
+		self._cleanup_orphaned_common_segments()
+
+	def _cleanup_orphaned_common_segments(self) -> None:
+		# Removing a common segment from options leaves its entity registry
+		# entry behind, which surfaces in HA as an "unavailable" alarm panel
+		# that never goes away. Same for the device. Walk both registries
+		# and drop entries that no longer correspond to a configured segment.
+		if self._central_unit is None:
+			return
+
+		entity_reg = er.async_get(self._hass)
+
+		unique_id_prefix = "{}.{}.".format(DOMAIN, self._central_unit.unique_id)
+		common_segment_unique_id_prefix = unique_id_prefix + "common_segment_"
+
+		valid_unique_ids: set[str] = set()
+		valid_device_ids: set[str] = set()
+		for control in self.entities[EntityType.ALARM_CONTROL_PANEL].values():
+			if isinstance(control, JablotronCommonSegment):
+				valid_unique_ids.add(unique_id_prefix + control.id)
+				if control.hass_device is not None:
+					valid_device_ids.add(control.hass_device.id)
+
+		# Collect entity orphans first. If there are none, we can skip the
+		# device-registry walk entirely — entities and devices are created /
+		# removed in lockstep, so an entity-clean state implies a device-clean
+		# state and we save the O(N) iteration over all integration devices.
+		orphan_entity_entries = [
+			entry
+			for entry in er.async_entries_for_config_entry(entity_reg, self._config_entry_id)
+			if entry.unique_id.startswith(common_segment_unique_id_prefix)
+			and entry.unique_id not in valid_unique_ids
+		]
+
+		if not orphan_entity_entries:
+			return
+
+		for entry in orphan_entity_entries:
+			entity_reg.async_remove(entry.entity_id)
+			stale_control_id = entry.unique_id[len(unique_id_prefix):]
+			self.entities_states.pop(stale_control_id, None)
+
+		device_reg = dr.async_get(self._hass)
+		for device_entry in dr.async_entries_for_config_entry(device_reg, self._config_entry_id):
+			should_remove = False
+			for identifier in device_entry.identifiers:
+				if identifier[0] != DOMAIN:
+					continue
+				device_id_part = identifier[1]
+				if not device_id_part.startswith("common_segment_"):
+					continue
+				if device_id_part not in valid_device_ids:
+					should_remove = True
+				break
+			if should_remove:
+				device_reg.async_remove_device(device_entry.id)
 
 	def _get_common_segments_config(self) -> List[Dict[str, Any]]:
 		raw = self._options.get(CONF_COMMON_SEGMENTS, [])
@@ -2603,17 +2689,17 @@ class Jablotron:
 		)
 
 	@staticmethod
-	def _create_common_segment_hass_device(index: int, name: str) -> JablotronHassDevice:
+	def _create_common_segment_hass_device(segment_id: str, name: str) -> JablotronHassDevice:
 		return JablotronHassDevice(
-			"common_segment_{}".format(index),
+			"common_segment_{}".format(segment_id),
 			name,
 			"common_segment",
 			{"name": name},
 		)
 
 	@staticmethod
-	def _get_common_segment_id(index: int) -> str:
-		return "common_segment_{}".format(index)
+	def _get_common_segment_id(segment_id: str) -> str:
+		return "common_segment_{}".format(segment_id)
 
 	@staticmethod
 	def _get_section_alarm_id(section: int) -> str:

@@ -547,7 +547,7 @@
 			}
 		},
 		"error": {
-			"common_segments_invalid_sections": "Sections must be a comma-separated list of section numbers (e.g. \"1, 2, 3\").",
+			"common_segments_invalid_sections": "Select at least one section.",
 			"common_segments_name_required": "Name is required when sections are provided."
 		}
 	},

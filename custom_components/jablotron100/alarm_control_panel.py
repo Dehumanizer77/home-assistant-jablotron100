@@ -40,7 +40,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: JablotronConfigEn
 
 class _JablotronAlarmControlPanelEntityBase(JablotronEntity, AlarmControlPanelEntity):
 	_code_required_for_disarm: bool = False
-	_partially_arming_mode: PartiallyArmingMode
+	_partially_arming_mode: PartiallyArmingMode = PartiallyArmingMode.NOT_SUPPORTED
 
 	_attr_name = None
 
