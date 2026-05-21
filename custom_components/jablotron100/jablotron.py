@@ -718,7 +718,6 @@ class Jablotron:
 			return
 
 		entity_reg = er.async_get(self._hass)
-		device_reg = dr.async_get(self._hass)
 
 		unique_id_prefix = "{}.{}.".format(DOMAIN, self._central_unit.unique_id)
 		common_segment_unique_id_prefix = unique_id_prefix + "common_segment_"
@@ -731,15 +730,26 @@ class Jablotron:
 				if control.hass_device is not None:
 					valid_device_ids.add(control.hass_device.id)
 
-		for entry in er.async_entries_for_config_entry(entity_reg, self._config_entry_id):
-			if not entry.unique_id.startswith(common_segment_unique_id_prefix):
-				continue
-			if entry.unique_id in valid_unique_ids:
-				continue
+		# Collect entity orphans first. If there are none, we can skip the
+		# device-registry walk entirely — entities and devices are created /
+		# removed in lockstep, so an entity-clean state implies a device-clean
+		# state and we save the O(N) iteration over all integration devices.
+		orphan_entity_entries = [
+			entry
+			for entry in er.async_entries_for_config_entry(entity_reg, self._config_entry_id)
+			if entry.unique_id.startswith(common_segment_unique_id_prefix)
+			and entry.unique_id not in valid_unique_ids
+		]
+
+		if not orphan_entity_entries:
+			return
+
+		for entry in orphan_entity_entries:
 			entity_reg.async_remove(entry.entity_id)
 			stale_control_id = entry.unique_id[len(unique_id_prefix):]
 			self.entities_states.pop(stale_control_id, None)
 
+		device_reg = dr.async_get(self._hass)
 		for device_entry in dr.async_entries_for_config_entry(device_reg, self._config_entry_id):
 			should_remove = False
 			for identifier in device_entry.identifiers:

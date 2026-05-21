@@ -7,7 +7,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResu
 from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import AbortFlow
-from homeassistant.helpers import selector
+from homeassistant.helpers import device_registry as dr, selector, translation
 import re
 import time
 import threading
@@ -548,6 +548,13 @@ class JablotronOptionsFlow(OptionsFlow):
 				if seg.get(CommonSegmentData.ID.value) == editing_id:
 					editing_index = i
 					break
+			if editing_index < 0:
+				# The segment being edited no longer exists (concurrent remove
+				# from another tab, options file edit, …). Drop the stale
+				# pointer and bounce back to the hub instead of silently
+				# turning Edit into Add of an unrelated new segment.
+				self._editing_segment_id = None
+				return await self.async_step_common_segments()
 		is_edit = editing_index >= 0
 
 		name_default = ""
@@ -587,7 +594,7 @@ class JablotronOptionsFlow(OptionsFlow):
 				self._persist_options()
 				return await self.async_step_common_segments()
 
-		section_options = self._get_section_selector_options(
+		section_options = await self._get_section_selector_options(
 			include=[int(s) for s in sections_default if str(s).isdigit()],
 		)
 
@@ -606,26 +613,62 @@ class JablotronOptionsFlow(OptionsFlow):
 			errors=errors,
 		)
 
-	def _get_section_selector_options(self, include: List[int] | None = None) -> List[Dict[str, str]]:
-		# Build the dropdown of available section numbers, preferring whatever
-		# the running Jablotron instance has detected. Falls back to the full
-		# MAX_SECTIONS range if the integration is not yet loaded.
-		sections: set[int] = set()
+	async def _get_section_selector_options(self, include: List[int] | None = None) -> List[Dict[str, str]]:
+		# Build the dropdown of available sections, preferring whatever the
+		# running Jablotron instance has detected. Each label tries to match
+		# what HA shows for the section device in *Devices & Services*:
+		#   1. user override (device.name_by_user) — wins, e.g. "Prízemie"
+		#   2. localized device name from the integration's translations
+		#   3. plain "Section N" as a last-resort fallback
+		# This stays in sync with custom renames and with the HA UI language
+		# without us hardcoding any of it.
+		device_reg = dr.async_get(self.hass)
+
+		try:
+			translations = await translation.async_get_translations(
+				self.hass, self.hass.config.language, "device", {DOMAIN}
+			)
+		except Exception:
+			translations = {}
+
+		section_name_template = translations.get(
+			"component.{}.device.section.name".format(DOMAIN),
+			"Section {sectionNo}",
+		)
+
+		def _default_label(section: int) -> str:
+			try:
+				return section_name_template.format(sectionNo=section)
+			except (KeyError, IndexError):
+				return "Section {}".format(section)
+
+		labels: Dict[int, str] = {}
 		try:
 			jablotron = self._config_entry.runtime_data
 			for control in jablotron.entities[EntityType.ALARM_CONTROL_PANEL].values():
-				if isinstance(control, JablotronAlarmControlPanel):
-					sections.add(control.section)
+				if not isinstance(control, JablotronAlarmControlPanel):
+					continue
+
+				label: str | None = None
+				if control.hass_device is not None:
+					device = device_reg.async_get_device(
+						identifiers={(DOMAIN, control.hass_device.id)},
+					)
+					if device is not None and device.name_by_user:
+						label = device.name_by_user
+
+				labels[control.section] = label or _default_label(control.section)
 		except (AttributeError, KeyError):
 			pass
 
 		if include:
-			sections.update(include)
+			for section in include:
+				labels.setdefault(section, _default_label(section))
 
-		if not sections:
-			sections = set(range(1, MAX_SECTIONS + 1))
+		if not labels:
+			labels = {s: _default_label(s) for s in range(1, MAX_SECTIONS + 1)}
 
-		return [{"value": str(s), "label": f"Section {s}"} for s in sorted(sections)]
+		return [{"value": str(s), "label": labels[s]} for s in sorted(labels.keys())]
 
 	def _persist_options(self) -> None:
 		# Push current self._options to the config entry without ending the flow.

@@ -547,7 +547,7 @@
 			}
 		},
 		"error": {
-			"common_segments_invalid_sections": "Sekcie musia byť zoznam čísel sekcií oddelený čiarkou (napr. \"1, 2, 3\").",
+			"common_segments_invalid_sections": "Vyber aspoň jednu sekciu.",
 			"common_segments_name_required": "Pri zadaných sekciách je názov povinný."
 		}
 	},

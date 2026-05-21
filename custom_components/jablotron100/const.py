@@ -21,19 +21,12 @@ CONF_REQUIRE_CODE_TO_ARM: Final = "require_code_to_arm"
 CONF_REQUIRE_CODE_TO_DISARM: Final = "require_code_to_disarm"
 CONF_PARTIALLY_ARMING_MODE: Final = "partially_arming_mode"
 CONF_ENABLE_DEBUGGING: Final = "enable_debugging"
-CONF_COMMON_SEGMENTS: Final = "common_segments"
-
-
-class CommonSegmentData(StrEnum):
-	ID = "id"
-	NAME = "name"
-	SECTIONS = "sections"
-
 CONF_LOG_ALL_INCOMING_PACKETS: Final = "log_all_incoming_packets"
 CONF_LOG_ALL_OUTCOMING_PACKETS: Final = "log_all_outcoming_packets"
 CONF_LOG_SECTIONS_PACKETS: Final = "log_sections_packets"
 CONF_LOG_PG_OUTPUTS_PACKETS: Final = "log_pg_outputs_packets"
 CONF_LOG_DEVICES_PACKETS: Final = "log_devices_packets"
+CONF_COMMON_SEGMENTS: Final = "common_segments"
 
 AUTODETECT_SERIAL_PORT: Final = "auto"
 
@@ -47,6 +40,12 @@ class CentralUnitData(StrEnum):
 	BUSES = "buses"
 	BATTERY_LEVEL = "battery_level"
 	LAN_IP = "lan_ip"
+
+
+class CommonSegmentData(StrEnum):
+	ID = "id"
+	NAME = "name"
+	SECTIONS = "sections"
 
 
 class DeviceData(StrEnum):
