@@ -771,11 +771,25 @@ class Jablotron:
 			return []
 		return raw
 
-	def _derive_common_segment_alarm_state(self, sections: List[int]) -> AlarmControlPanelState | None:
+	def _derive_common_segment_alarm_state(
+		self,
+		sections: List[int],
+		section_state_overrides: Dict[int, AlarmControlPanelState | None] | None = None,
+	) -> AlarmControlPanelState | None:
+		# `section_state_overrides` lets the caller hand in section states that
+		# haven't reached `entities_states` yet (e.g. updates from the packet
+		# we're processing right now — those are scheduled to the event loop
+		# via `call_soon_threadsafe`, so a same-thread read of `entities_states`
+		# would still see the previous packet's values and the common segment
+		# would lag by one packet — staying in ARMING after every section is
+		# already ARMED, etc.).
 		states: List[AlarmControlPanelState] = []
 		for section in sections:
-			section_id = self._get_section_alarm_id(section)
-			section_state = self.entities_states.get(section_id)
+			if section_state_overrides is not None and section in section_state_overrides:
+				section_state = section_state_overrides[section]
+			else:
+				section_id = self._get_section_alarm_id(section)
+				section_state = self.entities_states.get(section_id)
 			if section_state is None:
 				continue
 			states.append(section_state)
@@ -817,13 +831,16 @@ class Jablotron:
 
 		return level if level is not None else AlarmControlPanelState.DISARMED
 
-	def _refresh_common_segments_states(self) -> None:
+	def _refresh_common_segments_states(
+		self,
+		section_state_overrides: Dict[int, AlarmControlPanelState | None] | None = None,
+	) -> None:
 		for common_segment_id, control in self.entities[EntityType.ALARM_CONTROL_PANEL].items():
 			if not isinstance(control, JablotronCommonSegment):
 				continue
 			self._update_entity_state(
 				common_segment_id,
-				self._derive_common_segment_alarm_state(control.sections),
+				self._derive_common_segment_alarm_state(control.sections, section_state_overrides),
 				store_state=False,
 			)
 
@@ -1431,6 +1448,12 @@ class Jablotron:
 	def _parse_sections_states_packet(self, packet: bytes) -> None:
 		sections_states = self._convert_sections_states_packet_to_sections_states(packet)
 
+		# Section alarm states derived from THIS packet. We feed them straight
+		# into the common-segment refresh below so the derivation doesn't read
+		# stale values from `entities_states` (those won't reflect the updates
+		# we just scheduled until the event loop processes them).
+		section_alarm_states: Dict[int, AlarmControlPanelState | None] = {}
+
 		for section, section_state in sections_states.items():
 			if section_state.state == SectionPrimaryState.SERVICE:
 				# Service is for all sections - we can check only the first
@@ -1440,9 +1463,12 @@ class Jablotron:
 			if self._create_section(section, section_state):
 				self._send_signal_entities_added()
 
+			alarm_state = self._convert_jablotron_section_state_to_alarm_state(section_state, self.partially_arming_mode())
+			section_alarm_states[section] = alarm_state
+
 			self._update_entity_state(
 				self._get_section_alarm_id(section),
-				self._convert_jablotron_section_state_to_alarm_state(section_state, self.partially_arming_mode()),
+				alarm_state,
 				store_state=False,
 			)
 			self._update_entity_state(
@@ -1459,7 +1485,7 @@ class Jablotron:
 					store_state=False,
 				)
 
-		self._refresh_common_segments_states()
+		self._refresh_common_segments_states(section_state_overrides=section_alarm_states)
 
 		# No service mode found
 		self.in_service_mode = False
