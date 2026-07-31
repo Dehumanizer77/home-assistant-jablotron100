@@ -508,6 +508,7 @@
 			"init": {
 				"menu_options": {
 					"options": "Options",
+					"common_segments": "Common segments",
 					"debug": "Debugging"
 				}
 			},
@@ -517,6 +518,21 @@
 					"partially_arming_mode": "Partially arming",
 					"require_code_to_arm": "Require code to arm",
 					"require_code_to_disarm": "Require code to disarm"
+				}
+			},
+			"common_segments": {
+				"title": "Common segments",
+				"description": "Manage virtual common segments that arm/disarm multiple sections with a single command. Pick an action below.",
+				"data": {
+					"action": "Action"
+				}
+			},
+			"common_segment_form": {
+				"title": "Common segment",
+				"description": "Name the segment and pick which physical sections it controls.",
+				"data": {
+					"name": "Name",
+					"sections": "Sections"
 				}
 			},
 			"debug": {
@@ -529,6 +545,10 @@
 					"log_pg_outputs_packets": "Log PG outputs packets"
 				}
 			}
+		},
+		"error": {
+			"common_segments_invalid_sections": "Select at least one section.",
+			"common_segments_name_required": "Name is required when sections are provided."
 		}
 	},
 	"selector": {
@@ -643,6 +663,9 @@
 		},
 		"section": {
 			"name": "Section {sectionNo}"
+		},
+		"common_segment": {
+			"name": "{name}"
 		}
 	},
 	"entity": {
