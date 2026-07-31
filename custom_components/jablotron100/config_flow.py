@@ -7,16 +7,19 @@ from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResu
 from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import AbortFlow
-from homeassistant.helpers import selector
+from homeassistant.helpers import device_registry as dr, selector, translation
 import re
 import time
 import threading
+import uuid
 from typing import Any, Dict, List
 import voluptuous as vol
 from .const import (
 	AUTODETECT_SERIAL_PORT,
 	CODE_MAX_LENGTH,
 	CODE_MIN_LENGTH,
+	CommonSegmentData,
+	CONF_COMMON_SEGMENTS,
 	CONF_DEVICES,
 	CONF_ENABLE_DEBUGGING,
 	CONF_LOG_ALL_INCOMING_PACKETS,
@@ -35,9 +38,11 @@ from .const import (
 	DEFAULT_CONF_REQUIRE_CODE_TO_DISARM,
 	DOMAIN,
 	DeviceType,
+	EntityType,
 	LOGGER,
 	MAX_DEVICES,
 	MAX_PG_OUTPUTS,
+	MAX_SECTIONS,
 	NAME,
 	PACKET_SYSTEM_INFO,
 	PartiallyArmingMode,
@@ -52,7 +57,7 @@ from .errors import (
 	SerialPortNotDetected,
 	ServiceUnavailable,
 )
-from .jablotron import Jablotron
+from .jablotron import Jablotron, JablotronAlarmControlPanel
 
 
 def check_serial_port(serial_port: str) -> None:
@@ -157,6 +162,31 @@ def get_devices_fields(number_of_devices: int, default_values: List | None = Non
 
 def create_range_validation(minimum: int, maximum: int):
 	return vol.All(vol.Coerce(int), vol.Range(min=minimum, max=maximum))
+
+
+# Localized labels for the common-segments action SelectSelector. The labels
+# include dynamic parts (segment name, sections), so HA's translation_key
+# pathway can't handle them — picked at runtime from hass.config.language.
+_ACTION_LABELS: Dict[str, Dict[str, str]] = {
+	"en": {
+		"add": "+ Add common segment",
+		"edit": "✎ Edit: {name} ({sections})",
+		"remove": "✕ Remove: {name}",
+		"done": "✓ Done",
+	},
+	"sk": {
+		"add": "+ Pridať spoločný segment",
+		"edit": "✎ Upraviť: {name} ({sections})",
+		"remove": "✕ Odstrániť: {name}",
+		"done": "✓ Hotovo",
+	},
+	"cs": {
+		"add": "+ Přidat společný segment",
+		"edit": "✎ Upravit: {name} ({sections})",
+		"remove": "✕ Odstranit: {name}",
+		"done": "✓ Hotovo",
+	},
+}
 
 
 class JablotronConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -395,14 +425,17 @@ class JablotronConfigFlow(ConfigFlow, domain=DOMAIN):
 
 class JablotronOptionsFlow(OptionsFlow):
 	_options: Dict[str, Any]
+	_config_entry: ConfigEntry
+	_editing_segment_id: str | None = None
 
 	def __init__(self, config_entry: ConfigEntry) -> None:
+		self._config_entry = config_entry
 		self._options = deepcopy(dict(config_entry.options))
 
 	async def async_step_init(self, user_input: Dict[str, Any] | None = None) -> ConfigFlowResult:
 		return self.async_show_menu(
 			step_id="init",
-			menu_options=["options", "debug"],
+			menu_options=["options", "common_segments", "debug"],
 		)
 
 	async def async_step_options(self, user_input: Dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -442,6 +475,220 @@ class JablotronOptionsFlow(OptionsFlow):
 				}
 			),
 		)
+
+	async def async_step_common_segments(self, user_input: Dict[str, Any] | None = None) -> ConfigFlowResult:
+		# Hub step — lists currently configured common segments and lets the
+		# user pick an action (add / edit / remove / save & exit). The actual
+		# add/edit form lives in async_step_common_segment_form, which dispatches
+		# back here on save.
+		if user_input is not None:
+			action = str(user_input.get("action", ""))
+
+			if action == "add":
+				self._editing_segment_id = None
+				return await self.async_step_common_segment_form()
+
+			if action.startswith("edit_"):
+				self._editing_segment_id = action[len("edit_"):]
+				return await self.async_step_common_segment_form()
+
+			if action.startswith("remove_"):
+				segment_id = action[len("remove_"):]
+				segments = list(self._options.get(CONF_COMMON_SEGMENTS, []) or [])
+				filtered = [s for s in segments if s.get(CommonSegmentData.ID.value) != segment_id]
+				if len(filtered) != len(segments):
+					self._options[CONF_COMMON_SEGMENTS] = filtered
+					self._persist_options()
+				return await self.async_step_common_segments()
+
+			if action == "done":
+				# Close cleanly via async_create_entry instead of async_abort so
+				# the user gets the normal "Saved" toast rather than a popup
+				# they have to dismiss. Auto-save has already persisted the
+				# data, so HA's diff check inside async_update_entry will
+				# short-circuit and skip the extra reload.
+				return self._save()
+
+		existing = self._options.get(CONF_COMMON_SEGMENTS, []) or []
+
+		options: List[selector.SelectOptionDict] = [{"value": "add", "label": self._action_label("add")}]
+		for i, seg in enumerate(existing):
+			seg_id = str(seg.get(CommonSegmentData.ID.value, "") or "")
+			if not seg_id:
+				# Segment is in legacy/malformed shape — skip until the next
+				# integration reload backfills an id for it.
+				continue
+			name = str(seg.get(CommonSegmentData.NAME.value, "") or f"#{i + 1}")
+			sections_value = seg.get(CommonSegmentData.SECTIONS.value, []) or []
+			sections_str = ", ".join(str(s) for s in sections_value) if sections_value else "—"
+			options.append({"value": f"edit_{seg_id}", "label": self._action_label("edit", name=name, sections=sections_str)})
+			options.append({"value": f"remove_{seg_id}", "label": self._action_label("remove", name=name)})
+		options.append({"value": "done", "label": self._action_label("done")})
+
+		return self.async_show_form(
+			step_id="common_segments",
+			data_schema=vol.Schema({
+				vol.Required("action"): selector.SelectSelector(
+					selector.SelectSelectorConfig(
+						options=options,
+						mode=selector.SelectSelectorMode.LIST,
+					),
+				),
+			}),
+		)
+
+	async def async_step_common_segment_form(self, user_input: Dict[str, Any] | None = None) -> ConfigFlowResult:
+		# Add (when _editing_segment_id is None) or edit (when set) a single
+		# common segment. On save returns to the hub.
+		errors: Dict[str, str] = {}
+		existing = list(self._options.get(CONF_COMMON_SEGMENTS, []) or [])
+		editing_id = self._editing_segment_id
+
+		editing_index = -1
+		if editing_id:
+			for i, seg in enumerate(existing):
+				if seg.get(CommonSegmentData.ID.value) == editing_id:
+					editing_index = i
+					break
+			if editing_index < 0:
+				# The segment being edited no longer exists (concurrent remove
+				# from another tab, options file edit, …). Drop the stale
+				# pointer and bounce back to the hub instead of silently
+				# turning Edit into Add of an unrelated new segment.
+				self._editing_segment_id = None
+				return await self.async_step_common_segments()
+		is_edit = editing_index >= 0
+
+		name_default = ""
+		sections_default: List[str] = []
+
+		if is_edit:
+			seg = existing[editing_index]
+			name_default = str(seg.get(CommonSegmentData.NAME.value, "") or "")
+			sections_default = [str(s) for s in seg.get(CommonSegmentData.SECTIONS.value, []) or []]
+
+		if user_input is not None:
+			name_default = str(user_input.get("name", "") or "").strip()
+			sections_default = list(user_input.get("sections", []) or [])
+
+			try:
+				sections_int = [int(s) for s in sections_default]
+			except (ValueError, TypeError):
+				sections_int = []
+
+			if not name_default:
+				errors["name"] = "common_segments_name_required"
+			if not sections_int:
+				errors["sections"] = "common_segments_invalid_sections"
+
+			if not errors:
+				new_segment = {
+					CommonSegmentData.ID.value: editing_id if is_edit else uuid.uuid4().hex[:8],
+					CommonSegmentData.NAME.value: name_default,
+					CommonSegmentData.SECTIONS.value: sections_int,
+				}
+				if is_edit:
+					existing[editing_index] = new_segment
+				else:
+					existing.append(new_segment)
+				self._options[CONF_COMMON_SEGMENTS] = existing
+				self._editing_segment_id = None
+				self._persist_options()
+				return await self.async_step_common_segments()
+
+		section_options = await self._get_section_selector_options(
+			include=[int(s) for s in sections_default if str(s).isdigit()],
+		)
+
+		return self.async_show_form(
+			step_id="common_segment_form",
+			data_schema=vol.Schema({
+				vol.Required("name", default=name_default): str,
+				vol.Required("sections", default=sections_default): selector.SelectSelector(
+					selector.SelectSelectorConfig(
+						options=section_options,
+						multiple=True,
+						mode=selector.SelectSelectorMode.LIST,
+					),
+				),
+			}),
+			errors=errors,
+		)
+
+	async def _get_section_selector_options(self, include: List[int] | None = None) -> List[selector.SelectOptionDict]:
+		# Build the dropdown of available sections, preferring whatever the
+		# running Jablotron instance has detected. Each label tries to match
+		# what HA shows for the section device in *Devices & Services*:
+		#   1. user override (device.name_by_user) — wins, e.g. "Prízemie"
+		#   2. localized device name from the integration's translations
+		#   3. plain "Section N" as a last-resort fallback
+		# This stays in sync with custom renames and with the HA UI language
+		# without us hardcoding any of it.
+		device_reg = dr.async_get(self.hass)
+
+		try:
+			translations = await translation.async_get_translations(
+				self.hass, self.hass.config.language, "device", {DOMAIN}
+			)
+		except Exception:
+			translations = {}
+
+		section_name_template = translations.get(
+			"component.{}.device.section.name".format(DOMAIN),
+			"Section {sectionNo}",
+		)
+
+		def _default_label(section: int) -> str:
+			try:
+				return section_name_template.format(sectionNo=section)
+			except (KeyError, IndexError):
+				return "Section {}".format(section)
+
+		labels: Dict[int, str] = {}
+		try:
+			jablotron = self._config_entry.runtime_data
+			for control in jablotron.entities[EntityType.ALARM_CONTROL_PANEL].values():
+				if not isinstance(control, JablotronAlarmControlPanel):
+					continue
+
+				label: str | None = None
+				if control.hass_device is not None:
+					device = device_reg.async_get_device(
+						identifiers={(DOMAIN, control.hass_device.id)},
+					)
+					if device is not None and device.name_by_user:
+						label = device.name_by_user
+
+				labels[control.section] = label or _default_label(control.section)
+		except (AttributeError, KeyError):
+			pass
+
+		if include:
+			for section in include:
+				labels.setdefault(section, _default_label(section))
+
+		if not labels:
+			labels = {s: _default_label(s) for s in range(1, MAX_SECTIONS + 1)}
+
+		return [{"value": str(s), "label": labels[s]} for s in sorted(labels.keys())]
+
+	def _persist_options(self) -> None:
+		# Push current self._options to the config entry without ending the flow.
+		# Triggers options_update_listener which reloads the integration in
+		# background so the new entities appear (or removed ones disappear).
+		self.hass.config_entries.async_update_entry(
+			self._config_entry,
+			options=self._options,
+		)
+
+	def _action_label(self, key: str, **kwargs: str) -> str:
+		# HA SelectSelector only resolves translation_key for statically-known
+		# option values, so dynamically generated edit_<N> / remove_<N> labels
+		# can't go through strings.json. Localize them in Python instead by
+		# picking the user's HA language; fall back to English.
+		lang = (self.hass.config.language or "en").split("-")[0]
+		template = _ACTION_LABELS.get(lang, _ACTION_LABELS["en"]).get(key) or _ACTION_LABELS["en"][key]
+		return template.format(**kwargs) if kwargs else template
 
 	async def async_step_debug(self, user_input: Dict[str, Any] | None = None) -> ConfigFlowResult:
 		if user_input is not None:

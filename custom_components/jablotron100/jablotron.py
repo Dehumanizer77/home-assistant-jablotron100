@@ -16,6 +16,7 @@ from homeassistant.components.alarm_control_panel import AlarmControlPanelState
 from homeassistant.helpers import storage
 from homeassistant.helpers.dispatcher import async_dispatcher_send, dispatcher_send
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo, Entity
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import StateType
@@ -24,6 +25,7 @@ import math
 import os
 import threading
 import time
+import uuid
 from .const import (
 	AUTODETECT_SERIAL_PORT,
 	BATTERY_LEVEL_NO_BATTERY,
@@ -33,10 +35,12 @@ from .const import (
 	CentralUnitData,
 	CODE_MIN_LENGTH,
 	COMMAND_ENABLE_DEVICE_STATE_PACKETS,
+	CommonSegmentData,
 	COMMAND_GET_DEVICE_STATUS,
 	COMMAND_GET_SECTIONS_AND_PG_OUTPUTS_STATES,
 	COMMAND_HEARTBEAT,
 	COMMAND_RESPONSE_DEVICE_STATUS,
+	CONF_COMMON_SEGMENTS,
 	CONF_DEVICES,
 	CONF_ENABLE_DEBUGGING,
 	CONF_LOG_ALL_INCOMING_PACKETS,
@@ -200,6 +204,14 @@ class JablotronAlarmControlPanel(JablotronControl):
 		super().__init__(central_unit, hass_device, panel_id)
 
 
+class JablotronCommonSegment(JablotronControl):
+
+	def __init__(self, central_unit: JablotronCentralUnit, hass_device: JablotronHassDevice, panel_id: str, name: str, sections: List[int]) -> None:
+		self.sections: List[int] = sections
+
+		super().__init__(central_unit, hass_device, panel_id, name)
+
+
 class JablotronProgrammableOutput(JablotronControl):
 
 	def __init__(self, central_unit: JablotronCentralUnit, pg_output_id: str, pg_output_name: str, pg_output_number: int) -> None:
@@ -325,6 +337,7 @@ class Jablotron:
 		await self._create_devices()
 		# We need to detect devices first
 		self._detect_sections_and_pg_outputs()
+		self._create_common_segments()
 
 	def central_unit(self) -> JablotronCentralUnit:
 		assert self._central_unit is not None
@@ -349,6 +362,24 @@ class Jablotron:
 		self.hass_entities[control_id] = hass_entity
 
 	def modify_alarm_control_panel_section_state(self, section: int, state: AlarmControlPanelState, entered_code: str | None) -> None:
+		self._modify_alarm_control_panel_sections_state([section], state, entered_code)
+
+	def modify_common_segment_state(self, common_segment: JablotronCommonSegment, state: AlarmControlPanelState, entered_code: str | None) -> None:
+		valid_sections = [
+			section
+			for section in common_segment.sections
+			if self._get_section_alarm_id(section) in self.entities[EntityType.ALARM_CONTROL_PANEL]
+		]
+
+		if not valid_sections:
+			return
+
+		self._modify_alarm_control_panel_sections_state(valid_sections, state, entered_code)
+
+	def _modify_alarm_control_panel_sections_state(self, sections: List[int], state: AlarmControlPanelState, entered_code: str | None) -> None:
+		if not sections:
+			return
+
 		configured_code = self._config[CONF_PASSWORD]
 		assert isinstance(configured_code, str)
 
@@ -384,8 +415,9 @@ class Jablotron:
 			packets_to_send: List[bytes] = []
 
 			if self._successful_login:
-				modify_packet = self.int_to_bytes(int_packets[state] + section)
-				packets_to_send.append(self.create_packet_ui_control(UI_CONTROL_MODIFY_SECTION, modify_packet))
+				for section in sections:
+					modify_packet = self.int_to_bytes(int_packets[state] + section)
+					packets_to_send.append(self.create_packet_ui_control(UI_CONTROL_MODIFY_SECTION, modify_packet))
 
 			if code != configured_code:
 				packets_to_send.append(self.create_packet_ui_control(UI_CONTROL_AUTHORISATION_END))
@@ -637,6 +669,199 @@ class Jablotron:
 			)
 
 		return True
+
+	def _create_common_segments(self) -> None:
+		raw_configs = self._get_common_segments_config()
+		normalized_configs: List[Dict[str, Any]] = []
+		needs_persist = False
+
+		for common_segment_config in raw_configs:
+			normalized = dict(common_segment_config)
+
+			segment_id = str(normalized.get(CommonSegmentData.ID.value, "") or "")
+			if not segment_id:
+				# Backfill a stable random id for segments stored under the
+				# old index-based scheme. Persisting this back to options
+				# below means the same id sticks across reloads / reorders.
+				segment_id = uuid.uuid4().hex[:8]
+				normalized[CommonSegmentData.ID.value] = segment_id
+				needs_persist = True
+
+			normalized_configs.append(normalized)
+
+			name = str(normalized.get(CommonSegmentData.NAME.value, "") or "").strip()
+			sections = [int(s) for s in normalized.get(CommonSegmentData.SECTIONS.value, [])]
+
+			if not name or not sections:
+				continue
+
+			common_segment_id = self._get_common_segment_id(segment_id)
+			common_segment_hass_device = self._create_common_segment_hass_device(segment_id, name)
+
+			self.entities[EntityType.ALARM_CONTROL_PANEL][common_segment_id] = JablotronCommonSegment(
+				self.central_unit(),
+				common_segment_hass_device,
+				common_segment_id,
+				name,
+				sections,
+			)
+
+			initial_state = self._derive_common_segment_alarm_state(sections)
+			self._set_entity_initial_state(common_segment_id, initial_state)
+
+		if needs_persist:
+			# Safe to update options here: options_update_listener is only
+			# wired in __init__.py *after* initialize() returns, so this
+			# write doesn't trigger another reload loop.
+			config_entry = self._hass.config_entries.async_get_entry(self._config_entry_id)
+			if config_entry is not None:
+				new_options = dict(config_entry.options)
+				new_options[CONF_COMMON_SEGMENTS] = normalized_configs
+				self._hass.config_entries.async_update_entry(config_entry, options=new_options)
+				self._options = new_options
+
+		self._cleanup_orphaned_common_segments()
+
+	def _cleanup_orphaned_common_segments(self) -> None:
+		# Removing a common segment from options leaves its entity registry
+		# entry behind, which surfaces in HA as an "unavailable" alarm panel
+		# that never goes away. Same for the device. Walk both registries
+		# and drop entries that no longer correspond to a configured segment.
+		if self._central_unit is None:
+			return
+
+		entity_reg = er.async_get(self._hass)
+
+		unique_id_prefix = "{}.{}.".format(DOMAIN, self._central_unit.unique_id)
+		common_segment_unique_id_prefix = unique_id_prefix + "common_segment_"
+
+		valid_unique_ids: set[str] = set()
+		valid_device_ids: set[str] = set()
+		for control in self.entities[EntityType.ALARM_CONTROL_PANEL].values():
+			if isinstance(control, JablotronCommonSegment):
+				valid_unique_ids.add(unique_id_prefix + control.id)
+				if control.hass_device is not None:
+					valid_device_ids.add(control.hass_device.id)
+
+		# Collect entity orphans first. If there are none, we can skip the
+		# device-registry walk entirely — entities and devices are created /
+		# removed in lockstep, so an entity-clean state implies a device-clean
+		# state and we save the O(N) iteration over all integration devices.
+		orphan_entity_entries = [
+			entry
+			for entry in er.async_entries_for_config_entry(entity_reg, self._config_entry_id)
+			if entry.unique_id.startswith(common_segment_unique_id_prefix)
+			and entry.unique_id not in valid_unique_ids
+		]
+
+		if not orphan_entity_entries:
+			return
+
+		for entry in orphan_entity_entries:
+			entity_reg.async_remove(entry.entity_id)
+			stale_control_id = entry.unique_id[len(unique_id_prefix):]
+			self.entities_states.pop(stale_control_id, None)
+
+		device_reg = dr.async_get(self._hass)
+		for device_entry in dr.async_entries_for_config_entry(device_reg, self._config_entry_id):
+			should_remove = False
+			for identifier in device_entry.identifiers:
+				if identifier[0] != DOMAIN:
+					continue
+				device_id_part = identifier[1]
+				if not device_id_part.startswith("common_segment_"):
+					continue
+				if device_id_part not in valid_device_ids:
+					should_remove = True
+				break
+			if should_remove:
+				device_reg.async_remove_device(device_entry.id)
+
+	def _get_common_segments_config(self) -> List[Dict[str, Any]]:
+		raw = self._options.get(CONF_COMMON_SEGMENTS, [])
+		if not isinstance(raw, list):
+			return []
+		return raw
+
+	def _derive_common_segment_alarm_state(
+		self,
+		sections: List[int],
+		section_state_overrides: Dict[int, AlarmControlPanelState | None] | None = None,
+	) -> AlarmControlPanelState | None:
+		# `section_state_overrides` lets the caller hand in section states that
+		# haven't reached `entities_states` yet (e.g. updates from the packet
+		# we're processing right now — those are scheduled to the event loop
+		# via `call_soon_threadsafe`, so a same-thread read of `entities_states`
+		# would still see the previous packet's values and the common segment
+		# would lag by one packet — staying in ARMING after every section is
+		# already ARMED, etc.).
+		# Holds whatever `entities_states` carries for a section, not just
+		# alarm states — a section can legitimately hold `None`, and anything
+		# unrecognised is deliberately treated as "not armed" further down.
+		states: List[StateType | AlarmControlPanelState] = []
+		for section in sections:
+			section_state: StateType | AlarmControlPanelState
+			if section_state_overrides is not None and section in section_state_overrides:
+				section_state = section_state_overrides[section]
+			else:
+				section_id = self._get_section_alarm_id(section)
+				section_state = self.entities_states.get(section_id)
+			if section_state is None:
+				continue
+			states.append(section_state)
+
+		if not states:
+			return None
+
+		# TRIGGERED and PENDING are urgent states that should bubble up to the
+		# common segment regardless of other sections — the alarm is going off
+		# / about to go off and the user needs to see it on the aggregate entity.
+		if AlarmControlPanelState.TRIGGERED in states:
+			return AlarmControlPanelState.TRIGGERED
+		if AlarmControlPanelState.PENDING in states:
+			return AlarmControlPanelState.PENDING
+
+		# A common segment is "armed" (or "arming") only when every constituent
+		# section is at least beyond DISARMED. Without this check, arming a
+		# single section with delayed arming would flip the whole common segment
+		# into ARMING even though the rest of the house stays disarmed.
+		if AlarmControlPanelState.DISARMED in states:
+			return AlarmControlPanelState.DISARMED
+
+		if AlarmControlPanelState.ARMING in states:
+			return AlarmControlPanelState.ARMING
+
+		# Pick the lowest common armed level so any mixed armed states still report
+		# the segment as armed (just not at the strictest level).
+		level: AlarmControlPanelState | None = None
+		for state in states:
+			if state == AlarmControlPanelState.ARMED_AWAY:
+				if level is None:
+					level = AlarmControlPanelState.ARMED_AWAY
+				continue
+			if state == AlarmControlPanelState.ARMED_HOME:
+				level = AlarmControlPanelState.ARMED_HOME
+				continue
+			if state == AlarmControlPanelState.ARMED_NIGHT:
+				level = AlarmControlPanelState.ARMED_NIGHT
+				continue
+			# Anything else (e.g. None or unexpected) — treat as not armed.
+			return AlarmControlPanelState.DISARMED
+
+		return level if level is not None else AlarmControlPanelState.DISARMED
+
+	def _refresh_common_segments_states(
+		self,
+		section_state_overrides: Dict[int, AlarmControlPanelState | None] | None = None,
+	) -> None:
+		for common_segment_id, control in self.entities[EntityType.ALARM_CONTROL_PANEL].items():
+			if not isinstance(control, JablotronCommonSegment):
+				continue
+			self._update_entity_state(
+				common_segment_id,
+				self._derive_common_segment_alarm_state(control.sections, section_state_overrides),
+				store_state=False,
+			)
 
 	def _create_pg_outputs(self) -> None:
 		if not self._has_pg_outputs():
@@ -1320,6 +1545,12 @@ class Jablotron:
 	def _parse_sections_states_packet(self, packet: bytes) -> None:
 		sections_states = self._convert_sections_states_packet_to_sections_states(packet)
 
+		# Section alarm states derived from THIS packet. We feed them straight
+		# into the common-segment refresh below so the derivation doesn't read
+		# stale values from `entities_states` (those won't reflect the updates
+		# we just scheduled until the event loop processes them).
+		section_alarm_states: Dict[int, AlarmControlPanelState | None] = {}
+
 		for section, section_state in sections_states.items():
 			if section_state.state == SectionPrimaryState.SERVICE:
 				# Service is for all sections - we can check only the first
@@ -1329,9 +1560,12 @@ class Jablotron:
 			if self._create_section(section, section_state):
 				self._send_signal_entities_added()
 
+			alarm_state = self._convert_jablotron_section_state_to_alarm_state(section_state, self.partially_arming_mode())
+			section_alarm_states[section] = alarm_state
+
 			self._update_entity_state(
 				self._get_section_alarm_id(section),
-				self._convert_jablotron_section_state_to_alarm_state(section_state, self.partially_arming_mode()),
+				alarm_state,
 				store_state=False,
 			)
 			self._update_entity_state(
@@ -1347,6 +1581,8 @@ class Jablotron:
 					self._convert_jablotron_section_state_to_fire_sensor_state(section_state),
 					store_state=False,
 				)
+
+		self._refresh_common_segments_states(section_state_overrides=section_alarm_states)
 
 		# No service mode found
 		self.in_service_mode = False
@@ -2613,6 +2849,19 @@ class Jablotron:
 			"section",
 			{"sectionNo": f"{section:d}"},
 		)
+
+	@staticmethod
+	def _create_common_segment_hass_device(segment_id: str, name: str) -> JablotronHassDevice:
+		return JablotronHassDevice(
+			"common_segment_{}".format(segment_id),
+			name,
+			"common_segment",
+			{"name": name},
+		)
+
+	@staticmethod
+	def _get_common_segment_id(segment_id: str) -> str:
+		return "common_segment_{}".format(segment_id)
 
 	@staticmethod
 	def _get_section_alarm_id(section: int) -> str:
