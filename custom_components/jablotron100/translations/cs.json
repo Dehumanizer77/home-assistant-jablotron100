@@ -510,6 +510,7 @@
 			"init": {
 				"menu_options": {
 					"options": "Možnosti",
+					"common_segments": "Společné segmenty",
 					"debug": "Ladění"
 				}
 			},
@@ -519,6 +520,21 @@
 					"partially_arming_mode": "Částečné zabezpečení",
 					"require_code_to_arm": "Vyžadovat kód k zabezpečení",
 					"require_code_to_disarm": "Vyžadovat kód k odbezpečení"
+				}
+			},
+			"common_segments": {
+				"title": "Společné segmenty",
+				"description": "Spravuj virtuální společné segmenty, které jedním příkazem zabezpečí nebo odbezpečí více sekcí. Vyber akci níže.",
+				"data": {
+					"action": "Akce"
+				}
+			},
+			"common_segment_form": {
+				"title": "Společný segment",
+				"description": "Pojmenuj segment a vyber které fyzické sekce ovládá.",
+				"data": {
+					"name": "Název",
+					"sections": "Sekce"
 				}
 			},
 			"debug": {
@@ -531,6 +547,10 @@
 					"log_pg_outputs_packets": "Logovat pakety programovatelných výstupů PG"
 				}
 			}
+		},
+		"error": {
+			"common_segments_invalid_sections": "Vyber alespoň jednu sekci.",
+			"common_segments_name_required": "Při zadaných sekcích je název povinný."
 		}
 	},
 	"selector": {
@@ -645,6 +665,9 @@
 		},
 		"section": {
 			"name": "Sekce {sectionNo}"
+		},
+		"common_segment": {
+			"name": "{name}"
 		}
 	},
 	"entity": {
