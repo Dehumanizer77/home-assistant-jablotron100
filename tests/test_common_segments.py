@@ -20,6 +20,8 @@ from __future__ import annotations
 import _ha_entity_stubs  # noqa: F401  # must be imported before the modules below
 
 import asyncio
+import json
+import pathlib
 from typing import Any, Callable, Dict, List, Tuple
 
 from homeassistant.components.alarm_control_panel import (
@@ -1006,6 +1008,22 @@ def test_partially_armed_segment_asks_for_the_disarm_code() -> None:
 	assert entity._attr_code_format is not None
 
 
+def test_partially_armed_state_is_relabelled_in_every_translation() -> None:
+	"""Home Assistant's own label for this state is wrong for a common segment.
+
+	Tied to the constant on purpose: changing the reported state without moving
+	the override with it would silently bring the stock label back.
+	"""
+	integration = pathlib.Path(jablotron_module.__file__).parent
+	files = ["strings.json", "translations/en.json", "translations/sk.json", "translations/cs.json"]
+
+	for name in files:
+		states = json.loads((integration / name).read_text(encoding="utf-8"))[
+			"entity"]["alarm_control_panel"]["common_segment"]["state"]
+		assert str(COMMON_SEGMENT_PARTIALLY_ARMED) in states, name
+		assert states[str(COMMON_SEGMENT_PARTIALLY_ARMED)].strip(), name
+
+
 def test_common_segment_entity_links_its_device_to_the_central_unit() -> None:
 	"""Home Assistant 2026.9.1 dropped DeviceInfo's `via_device` identifier tuple.
 
@@ -1018,6 +1036,19 @@ def test_common_segment_entity_links_its_device_to_the_central_unit() -> None:
 	assert device_info is not None
 	assert device_info["via_device_id"] == jablotron.central_unit_device_id()
 	assert "via_device" not in device_info
+
+
+def test_common_segment_entity_declares_the_translation_key() -> None:
+	_, entity = make_common_segment_entity([1, 2])
+
+	assert entity._attr_translation_key == "common_segment"
+
+
+def test_translation_key_does_not_take_over_the_entity_name() -> None:
+	"""`_attr_name = None` must still win, so the device name is used."""
+	_, entity = make_common_segment_entity([1, 2])
+
+	assert entity._attr_name is None
 
 
 def test_partially_armed_segment_does_not_offer_arm_custom_bypass() -> None:
