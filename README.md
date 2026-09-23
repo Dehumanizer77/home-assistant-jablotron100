@@ -46,6 +46,8 @@ Jablotron 100 supports a "common segment" — a single button that arms or disar
 
 ## Before installation
 
+Requires Home Assistant 2026.9.1 or newer.
+
 1. Connect the USB cable to Jablotron central unit
 2. Restart the Home Assistant OS
 

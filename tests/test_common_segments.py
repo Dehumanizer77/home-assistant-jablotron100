@@ -790,6 +790,12 @@ class FakeJablotron:
 		self.section_calls: List[Tuple[int, AlarmControlPanelState, str | None]] = []
 		self.common_segment_calls: List[Tuple[JablotronCommonSegment, AlarmControlPanelState, str | None]] = []
 
+	def central_unit_device_id(self) -> str:
+		# Entities link their device to the central unit through this id since
+		# Home Assistant 2026.9.1 replaced DeviceInfo's `via_device` identifier
+		# tuple with `via_device_id`.
+		return "central-unit-device-id"
+
 	def partially_arming_mode(self) -> PartiallyArmingMode:
 		return PartiallyArmingMode.NIGHT_MODE
 
@@ -998,6 +1004,20 @@ def test_partially_armed_segment_asks_for_the_disarm_code() -> None:
 	entity._update_attributes()
 
 	assert entity._attr_code_format is not None
+
+
+def test_common_segment_entity_links_its_device_to_the_central_unit() -> None:
+	"""Home Assistant 2026.9.1 dropped DeviceInfo's `via_device` identifier tuple.
+
+	A rebase that silently brought the old key back would only show up as a
+	mypy failure in CI, so pin the linkage here as well.
+	"""
+	jablotron, entity = make_common_segment_entity([1, 2])
+	device_info = entity._attr_device_info
+
+	assert device_info is not None
+	assert device_info["via_device_id"] == jablotron.central_unit_device_id()
+	assert "via_device" not in device_info
 
 
 def test_partially_armed_segment_does_not_offer_arm_custom_bypass() -> None:
