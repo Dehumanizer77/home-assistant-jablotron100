@@ -669,6 +669,13 @@
 		}
 	},
 	"entity": {
+		"alarm_control_panel": {
+			"common_segment": {
+				"state": {
+					"armed_custom_bypass": "Částečně zabezpečeno"
+				}
+			}
+		},
 		"binary_sensor": {
 			"battery_problem": {
 				"name": "Problém baterie"
