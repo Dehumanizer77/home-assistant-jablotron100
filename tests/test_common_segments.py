@@ -20,6 +20,8 @@ from __future__ import annotations
 import _ha_entity_stubs  # noqa: F401  # must be imported before the modules below
 
 import asyncio
+import json
+import pathlib
 import threading
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -33,6 +35,7 @@ from homeassistant.helpers import entity_registry as ha_er
 import pytest
 
 from custom_components.jablotron100 import alarm_control_panel as alarm_control_panel_module
+from custom_components.jablotron100 import jablotron as jablotron_module
 from custom_components.jablotron100.alarm_control_panel import (
 	JablotronAlarmControlPanelEntity,
 	JablotronCommonSegmentEntity,
@@ -1047,17 +1050,20 @@ def test_partially_armed_segment_asks_for_the_disarm_code() -> None:
 	assert entity._attr_code_format is not None
 
 
-def test_partially_armed_segment_does_not_offer_arm_custom_bypass() -> None:
-	"""The state is reported, never offered as an action.
+def test_partially_armed_state_is_relabelled_in_every_translation() -> None:
+	"""Home Assistant's own label for this state is wrong for a common segment.
 
-	Advertising the feature would put a button in the UI for an arming mode the
-	panel has no packet for.
+	Tied to the constant on purpose: changing the reported state without moving
+	the override with it would silently bring the stock label back.
 	"""
-	_, entity = make_common_segment_entity([1, 2])
+	integration = pathlib.Path(jablotron_module.__file__).parent
+	files = ["strings.json", "translations/en.json", "translations/sk.json", "translations/cs.json"]
 
-	entity._update_attributes()
-
-	assert not entity._attr_supported_features & AlarmControlPanelEntityFeature.ARM_CUSTOM_BYPASS
+	for name in files:
+		states = json.loads((integration / name).read_text(encoding="utf-8"))[
+			"entity"]["alarm_control_panel"]["common_segment"]["state"]
+		assert str(COMMON_SEGMENT_PARTIALLY_ARMED) in states, name
+		assert states[str(COMMON_SEGMENT_PARTIALLY_ARMED)].strip(), name
 
 
 def test_common_segment_entity_links_its_device_to_the_central_unit() -> None:
@@ -1072,6 +1078,32 @@ def test_common_segment_entity_links_its_device_to_the_central_unit() -> None:
 	assert device_info is not None
 	assert device_info["via_device_id"] == jablotron.central_unit_device_id()
 	assert "via_device" not in device_info
+
+
+def test_common_segment_entity_declares_the_translation_key() -> None:
+	_, entity = make_common_segment_entity([1, 2])
+
+	assert entity._attr_translation_key == "common_segment"
+
+
+def test_translation_key_does_not_take_over_the_entity_name() -> None:
+	"""`_attr_name = None` must still win, so the device name is used."""
+	_, entity = make_common_segment_entity([1, 2])
+
+	assert entity._attr_name is None
+
+
+def test_partially_armed_segment_does_not_offer_arm_custom_bypass() -> None:
+	"""The state is reported, never offered as an action.
+
+	Advertising the feature would put a button in the UI for an arming mode the
+	panel has no packet for.
+	"""
+	_, entity = make_common_segment_entity([1, 2])
+
+	entity._update_attributes()
+
+	assert not entity._attr_supported_features & AlarmControlPanelEntityFeature.ARM_CUSTOM_BYPASS
 
 
 def test_common_segment_entity_rejects_a_non_alarm_state() -> None:
