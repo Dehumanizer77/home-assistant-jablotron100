@@ -22,7 +22,10 @@ import _ha_entity_stubs  # noqa: F401  # must be imported before the modules bel
 import asyncio
 from typing import Any, Callable, Dict, List, Tuple
 
-from homeassistant.components.alarm_control_panel import AlarmControlPanelState
+from homeassistant.components.alarm_control_panel import (
+	AlarmControlPanelEntityFeature,
+	AlarmControlPanelState,
+)
 from homeassistant.const import CONF_PASSWORD
 from homeassistant.helpers import device_registry as ha_dr
 from homeassistant.helpers import entity_registry as ha_er
@@ -43,6 +46,7 @@ from custom_components.jablotron100.const import (
 	UI_CONTROL_MODIFY_SECTION,
 )
 from custom_components.jablotron100.jablotron import (
+	COMMON_SEGMENT_PARTIALLY_ARMED,
 	Jablotron,
 	JablotronAlarmControlPanel,
 	JablotronCentralUnit,
@@ -127,9 +131,55 @@ def make_jablotron(section_states: Dict[int, AlarmControlPanelState | None] | No
 			id="mixed-armed-night-reports-lowest-level",
 		),
 		pytest.param(
+			{1: AlarmControlPanelState.ARMED_AWAY, 2: AlarmControlPanelState.DISARMED},
+			COMMON_SEGMENT_PARTIALLY_ARMED,
+			id="partially-armed",
+		),
+		pytest.param(
+			{
+				1: AlarmControlPanelState.ARMED_AWAY,
+				2: AlarmControlPanelState.ARMED_AWAY,
+				3: AlarmControlPanelState.DISARMED,
+			},
+			COMMON_SEGMENT_PARTIALLY_ARMED,
+			id="partially-armed-majority",
+		),
+		pytest.param(
+			{1: AlarmControlPanelState.ARMING, 2: AlarmControlPanelState.DISARMED},
+			COMMON_SEGMENT_PARTIALLY_ARMED,
+			id="partially-arming",
+		),
+		pytest.param(
+			{
+				1: AlarmControlPanelState.ARMED_AWAY,
+				2: AlarmControlPanelState.ARMING,
+				3: AlarmControlPanelState.DISARMED,
+			},
+			COMMON_SEGMENT_PARTIALLY_ARMED,
+			id="partially-armed-and-arming",
+		),
+		pytest.param(
 			{1: AlarmControlPanelState.TRIGGERED, 2: AlarmControlPanelState.DISARMED},
 			AlarmControlPanelState.TRIGGERED,
 			id="triggered-beats-disarmed",
+		),
+		pytest.param(
+			{
+				1: AlarmControlPanelState.TRIGGERED,
+				2: AlarmControlPanelState.ARMED_AWAY,
+				3: AlarmControlPanelState.DISARMED,
+			},
+			AlarmControlPanelState.TRIGGERED,
+			id="triggered-beats-partially-armed",
+		),
+		pytest.param(
+			{
+				1: AlarmControlPanelState.PENDING,
+				2: AlarmControlPanelState.ARMED_AWAY,
+				3: AlarmControlPanelState.DISARMED,
+			},
+			AlarmControlPanelState.PENDING,
+			id="pending-beats-partially-armed",
 		),
 		pytest.param(
 			{1: AlarmControlPanelState.TRIGGERED, 2: AlarmControlPanelState.PENDING},
@@ -157,24 +207,46 @@ def test_derive_common_segment_alarm_state(
 	assert instance._derive_common_segment_alarm_state(list(section_states)) == expected
 
 
-def test_single_arming_section_keeps_common_segment_disarmed() -> None:
-	"""Arming one delayed section must not flip the whole segment to ARMING."""
+def test_single_arming_section_does_not_report_the_segment_as_arming() -> None:
+	"""Arming one delayed section must not flip the whole segment to ARMING.
+
+	ARMING is reserved for "the whole segment is on its way to armed". A single
+	section counting down makes the segment partially armed, not arming.
+	"""
 	instance = make_jablotron({
 		1: AlarmControlPanelState.ARMING,
 		2: AlarmControlPanelState.DISARMED,
 		3: AlarmControlPanelState.DISARMED,
 	})
 
-	assert instance._derive_common_segment_alarm_state([1, 2, 3]) == AlarmControlPanelState.DISARMED
+	assert instance._derive_common_segment_alarm_state([1, 2, 3]) == COMMON_SEGMENT_PARTIALLY_ARMED
 
 
-def test_single_armed_section_keeps_common_segment_disarmed() -> None:
+def test_single_armed_section_reports_the_segment_as_partially_armed() -> None:
 	instance = make_jablotron({
 		1: AlarmControlPanelState.ARMED_AWAY,
 		2: AlarmControlPanelState.DISARMED,
 	})
 
-	assert instance._derive_common_segment_alarm_state([1, 2]) == AlarmControlPanelState.DISARMED
+	assert instance._derive_common_segment_alarm_state([1, 2]) == COMMON_SEGMENT_PARTIALLY_ARMED
+
+
+def test_partially_armed_is_a_state_home_assistant_knows() -> None:
+	"""The aggregate state has to be a real member of Home Assistant's enum.
+
+	Reporting anything else would leave the entity unavailable in the UI, and
+	the entity base class rejects non-enum states outright.
+	"""
+	assert isinstance(COMMON_SEGMENT_PARTIALLY_ARMED, AlarmControlPanelState)
+	assert COMMON_SEGMENT_PARTIALLY_ARMED not in (
+		AlarmControlPanelState.DISARMED,
+		AlarmControlPanelState.ARMED_AWAY,
+		AlarmControlPanelState.ARMED_HOME,
+		AlarmControlPanelState.ARMED_NIGHT,
+		AlarmControlPanelState.ARMING,
+		AlarmControlPanelState.PENDING,
+		AlarmControlPanelState.TRIGGERED,
+	)
 
 
 def test_derive_returns_none_without_sections() -> None:
@@ -196,10 +268,17 @@ def test_derive_skips_sections_without_state() -> None:
 	assert instance._derive_common_segment_alarm_state([1, 99]) == AlarmControlPanelState.ARMED_AWAY
 
 
-def test_derive_treats_unexpected_state_as_disarmed() -> None:
-	instance = make_jablotron({1: AlarmControlPanelState.ARMED_AWAY, 2: "something-else"})
+def test_derive_treats_unexpected_state_as_not_armed() -> None:
+	instance = make_jablotron({1: "something-else", 2: "something-else"})
 
 	assert instance._derive_common_segment_alarm_state([1, 2]) == AlarmControlPanelState.DISARMED
+
+
+def test_derive_counts_an_unexpected_state_against_a_full_arm() -> None:
+	"""An unrecognised section state must never be mistaken for "armed"."""
+	instance = make_jablotron({1: AlarmControlPanelState.ARMED_AWAY, 2: "something-else"})
+
+	assert instance._derive_common_segment_alarm_state([1, 2]) == COMMON_SEGMENT_PARTIALLY_ARMED
 
 
 def test_overrides_take_precedence_over_stored_states() -> None:
@@ -217,7 +296,11 @@ def test_overrides_take_precedence_over_stored_states() -> None:
 
 
 def test_overrides_are_used_per_section() -> None:
-	"""Sections missing from the overrides still fall back to stored state."""
+	"""Sections missing from the overrides still fall back to stored state.
+
+	The override disarms section 1 while section 2 keeps its stored ARMED_AWAY,
+	so the result can only be "partially armed" if both sources were consulted.
+	"""
 	instance = make_jablotron({1: AlarmControlPanelState.ARMED_AWAY, 2: AlarmControlPanelState.ARMED_AWAY})
 
 	derived = instance._derive_common_segment_alarm_state(
@@ -225,7 +308,7 @@ def test_overrides_are_used_per_section() -> None:
 		section_state_overrides={1: AlarmControlPanelState.DISARMED},
 	)
 
-	assert derived == AlarmControlPanelState.DISARMED
+	assert derived == COMMON_SEGMENT_PARTIALLY_ARMED
 
 
 def test_override_with_none_skips_the_section() -> None:
@@ -865,6 +948,69 @@ def test_common_segment_entity_disarms() -> None:
 
 	assert len(jablotron.common_segment_calls) == 1
 	assert jablotron.common_segment_calls[0][1] == AlarmControlPanelState.DISARMED
+
+
+def test_common_segment_entity_disarms_from_partially_armed() -> None:
+	"""The point of the partial state: it still offers a disarm.
+
+	`alarm_disarm()` short-circuits on DISARMED, which is what a partly armed
+	segment used to report - pressing disarm then did nothing at all.
+	"""
+	jablotron, entity = make_common_segment_entity([1, 2])
+	jablotron.entities_states[entity._control.id] = COMMON_SEGMENT_PARTIALLY_ARMED
+
+	entity.alarm_disarm()
+
+	assert len(jablotron.common_segment_calls) == 1
+	control, state, _ = jablotron.common_segment_calls[0]
+	assert state == AlarmControlPanelState.DISARMED
+	assert control.sections == [1, 2]
+
+
+def test_common_segment_entity_arms_away_from_partially_armed() -> None:
+	"""Arming a partly armed segment must top it up, not be treated as a no-op."""
+	jablotron, entity = make_common_segment_entity([1, 2])
+	jablotron.entities_states[entity._control.id] = COMMON_SEGMENT_PARTIALLY_ARMED
+	entity._update_attributes()
+
+	entity.alarm_arm_away()
+
+	assert len(jablotron.common_segment_calls) == 1
+	assert jablotron.common_segment_calls[0][1] == AlarmControlPanelState.ARMED_AWAY
+
+
+def test_common_segment_entity_accepts_the_partially_armed_state() -> None:
+	"""Upstream's type guard must not reject the aggregate state."""
+	jablotron, entity = make_common_segment_entity([1, 2])
+	jablotron.entities_states[entity._control.id] = COMMON_SEGMENT_PARTIALLY_ARMED
+
+	assert entity._get_state() == COMMON_SEGMENT_PARTIALLY_ARMED
+	assert entity.available is True
+
+
+def test_partially_armed_segment_asks_for_the_disarm_code() -> None:
+	"""Code format follows the disarm requirement once anything is armed."""
+	jablotron, entity = make_common_segment_entity([1, 2])
+	jablotron.is_code_required_for_disarm = lambda: True  # type: ignore[method-assign]
+	jablotron.is_code_required_for_arm = lambda: False  # type: ignore[method-assign]
+	jablotron.entities_states[entity._control.id] = COMMON_SEGMENT_PARTIALLY_ARMED
+
+	entity._update_attributes()
+
+	assert entity._attr_code_format is not None
+
+
+def test_partially_armed_segment_does_not_offer_arm_custom_bypass() -> None:
+	"""The state is reported, never offered as an action.
+
+	Advertising the feature would put a button in the UI for an arming mode the
+	panel has no packet for.
+	"""
+	_, entity = make_common_segment_entity([1, 2])
+
+	entity._update_attributes()
+
+	assert not entity._attr_supported_features & AlarmControlPanelEntityFeature.ARM_CUSTOM_BYPASS
 
 
 def test_common_segment_entity_rejects_a_non_alarm_state() -> None:

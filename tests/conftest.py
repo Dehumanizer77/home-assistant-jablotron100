@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 
 	class AlarmControlPanelState(StrEnum):
 		ARMED_AWAY = "armed_away"
+		ARMED_CUSTOM_BYPASS = "armed_custom_bypass"
 		ARMED_HOME = "armed_home"
 		ARMED_NIGHT = "armed_night"
 		ARMING = "arming"

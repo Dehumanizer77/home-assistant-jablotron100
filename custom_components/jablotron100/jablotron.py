@@ -127,6 +127,23 @@ STORAGE_CENTRAL_UNIT_KEY: Final = "central_unit"
 STORAGE_DEVICES_KEY: Final = "devices"
 STORAGE_STATES_KEY: Final = "states"
 
+# Home Assistant has no "partially armed" alarm state. ARMED_CUSTOM_BYPASS -
+# armed with some parts deliberately left out - is the closest one it defines,
+# and that is exactly a common segment whose sections are only partly armed.
+# It is reported, never offered as an action: the entity does not advertise
+# ARM_CUSTOM_BYPASS, so the only thing Home Assistant offers from this state is
+# disarming, which is what the physical common segment button does too.
+COMMON_SEGMENT_PARTIALLY_ARMED: Final = AlarmControlPanelState.ARMED_CUSTOM_BYPASS
+
+# Armed levels a section can report, least strict first. A fully armed common
+# segment reports the first of these any of its sections is in, so it never
+# claims to be armed more strictly than it really is.
+ARMED_LEVELS_LEAST_STRICT_FIRST: Final = (
+	AlarmControlPanelState.ARMED_NIGHT,
+	AlarmControlPanelState.ARMED_HOME,
+	AlarmControlPanelState.ARMED_AWAY,
+)
+
 DEVICE_TYPE_TO_ENTITY_TYPE: Final = {
 	DeviceType.MOTION_DETECTOR: EntityType.DEVICE_STATE_MOTION,
 	DeviceType.WINDOW_OPENING_DETECTOR: EntityType.DEVICE_STATE_WINDOW,
@@ -821,34 +838,24 @@ class Jablotron:
 		if AlarmControlPanelState.PENDING in states:
 			return AlarmControlPanelState.PENDING
 
-		# A common segment is "armed" (or "arming") only when every constituent
-		# section is at least beyond DISARMED. Without this check, arming a
-		# single section with delayed arming would flip the whole common segment
-		# into ARMING even though the rest of the house stays disarmed.
-		if AlarmControlPanelState.DISARMED in states:
+		# Anything that is neither a known armed level nor ARMING counts as not
+		# armed: DISARMED, but also the unexpected values `entities_states` can
+		# carry.
+		armed_levels = [state for state in states if state in ARMED_LEVELS_LEAST_STRICT_FIRST]
+		arming_count = sum(1 for state in states if state == AlarmControlPanelState.ARMING)
+
+		if not armed_levels and arming_count == 0:
 			return AlarmControlPanelState.DISARMED
 
-		if AlarmControlPanelState.ARMING in states:
+		if len(armed_levels) + arming_count < len(states):
+			# Part of the segment is armed (or on its way there), the rest is not.
+			return COMMON_SEGMENT_PARTIALLY_ARMED
+
+		# Every section is armed or on its way there.
+		if arming_count > 0:
 			return AlarmControlPanelState.ARMING
 
-		# Pick the lowest common armed level so any mixed armed states still report
-		# the segment as armed (just not at the strictest level).
-		level: AlarmControlPanelState | None = None
-		for state in states:
-			if state == AlarmControlPanelState.ARMED_AWAY:
-				if level is None:
-					level = AlarmControlPanelState.ARMED_AWAY
-				continue
-			if state == AlarmControlPanelState.ARMED_HOME:
-				level = AlarmControlPanelState.ARMED_HOME
-				continue
-			if state == AlarmControlPanelState.ARMED_NIGHT:
-				level = AlarmControlPanelState.ARMED_NIGHT
-				continue
-			# Anything else (e.g. None or unexpected) — treat as not armed.
-			return AlarmControlPanelState.DISARMED
-
-		return level if level is not None else AlarmControlPanelState.DISARMED
+		return next(level for level in ARMED_LEVELS_LEAST_STRICT_FIRST if level in armed_levels)
 
 	def _refresh_common_segments_states(
 		self,
