@@ -37,6 +37,7 @@ class _AlarmControlPanelEntityFeature(IntFlag):
 	ARM_AWAY = 2
 	ARM_NIGHT = 4
 	TRIGGER = 8
+	ARM_CUSTOM_BYPASS = 16
 	ARM_VACATION = 32
 
 
