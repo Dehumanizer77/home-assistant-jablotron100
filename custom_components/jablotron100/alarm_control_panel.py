@@ -147,6 +147,12 @@ class JablotronAlarmControlPanelEntity(_JablotronAlarmControlPanelEntityBase):
 class JablotronCommonSegmentEntity(_JablotronAlarmControlPanelEntityBase):
 	_control: JablotronCommonSegment
 
+	# Only here to relabel ARMED_CUSTOM_BYPASS, which Home Assistant translates
+	# as "armed custom bypass" - nonsense for a common segment, and outright
+	# broken in Slovak ("Zakódované prispôsobené vylúčenie"). The entity name is
+	# unaffected: `_attr_name` is None, so the device name still wins.
+	_attr_translation_key = "common_segment"
+
 	def _update_attributes(self) -> None:
 		super()._update_attributes()
 		self._attr_extra_state_attributes = {
