@@ -663,8 +663,11 @@ class JablotronOptionsFlow(OptionsFlow):
 
 				label: str | None = None
 				if control.hass_device is not None:
-					device = device_reg.async_get_device(
-						identifiers={(DOMAIN, control.hass_device.id)},
+					# Section identifiers repeat on every panel, so the lookup has
+					# to stay within this flow's own config entry.
+					device = device_reg.async_get_device_by_identifier(
+						(DOMAIN, control.hass_device.id),
+						self._config_entry.entry_id,
 					)
 					if device is not None and device.name_by_user:
 						label = device.name_by_user
@@ -686,9 +689,15 @@ class JablotronOptionsFlow(OptionsFlow):
 		# Push current self._options to the config entry without ending the flow.
 		# Triggers options_update_listener which reloads the integration in
 		# background so the new entities appear (or removed ones disappear).
+		#
+		# Home Assistant keeps the mapping it is given rather than copying it,
+		# so it has to get its own copy. Handing over self._options would make
+		# the entry share this flow's working state: the next change would
+		# already be in the entry when it is saved, compare as equal, and
+		# neither reload the integration nor be written to disk.
 		self.hass.config_entries.async_update_entry(
 			self._config_entry,
-			options=self._options,
+			options=deepcopy(self._options),
 		)
 
 	def _action_label(self, key: str, **kwargs: str) -> str:
